@@ -1,0 +1,88 @@
+name: Release
+
+# Fires when a vX.Y.Z tag is pushed (by release.sh). Regenerates the Homebrew
+# formula from the published tag archive and pushes it to the tap. The source
+# repo carries no formula content — the tap is the only place formulas live.
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  update-tap:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute source tarball SHA256 from the published tag archive
+        id: tarball
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          URL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/v${VERSION}.tar.gz"
+          # The tag archive can lag the tag push by a few seconds.
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL "$URL" -o source.tar.gz; then break; fi
+            echo "waiting for GitHub to generate the tag archive ($attempt/5)..."
+            sleep 5
+          done
+          SHA=$(shasum -a 256 source.tar.gz | awk '{print $1}')
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Regenerate Formula/decrypt-pdf.rb
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          FORMULA_URL: ${{ steps.tarball.outputs.url }}
+          FORMULA_SHA: ${{ steps.tarball.outputs.sha256 }}
+        run: |
+          mkdir -p dist
+          cat > dist/decrypt-pdf.rb <<FORMULA
+          class DecryptPdf < Formula
+            desc "Decrypt password-protected PDFs using a cascading strategy (qpdf, mutool, ghostscript)"
+            homepage "https://github.com/Sdaas/decrypt-pdf"
+            url "${FORMULA_URL}"
+            sha256 "${FORMULA_SHA}"
+            license "MIT"
+
+            depends_on "qpdf"
+            depends_on "mupdf-tools"
+            depends_on "ghostscript"
+
+            def install
+              # Stamp the release version into the script's placeholder.
+              inreplace "decrypt-pdf", "__VERSION__", version.to_s
+              bin.install "decrypt-pdf"
+            end
+
+            test do
+              assert_match "decrypt-pdf #{version}", shell_output("#{bin}/decrypt-pdf --version")
+            end
+          end
+          FORMULA
+          echo "----- generated formula -----"
+          cat dist/decrypt-pdf.rb
+
+      - name: Checkout the tap
+        uses: actions/checkout@v4
+        with:
+          repository: Sdaas/homebrew-tools
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          path: tap
+
+      - name: Commit and push the updated formula
+        run: |
+          cp dist/decrypt-pdf.rb tap/Formula/decrypt-pdf.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- Formula/decrypt-pdf.rb; then
+            echo "formula already up to date; nothing to push"
+            exit 0
+          fi
+          git add Formula/decrypt-pdf.rb
+          git commit -m "decrypt-pdf: update to v${{ steps.ver.outputs.version }}"
+          git push

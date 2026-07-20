@@ -16,6 +16,7 @@ set -euo pipefail
 # Constants
 # ---------------------------------------------------------------------------
 readonly SCRIPT_NAME="$(basename "$0")"
+readonly VERSION="__VERSION__"   # replaced with the tag version at release time
 readonly COLOR_GREEN="\033[0;32m"
 readonly COLOR_YELLOW="\033[0;33m"
 readonly COLOR_RED="\033[0;31m"
@@ -101,6 +102,10 @@ parse_args() {
         case "$1" in
             -h|--help)
                 print_usage
+                exit 0
+                ;;
+            --version)
+                echo "decrypt-pdf ${VERSION}"
                 exit 0
                 ;;
             --verbose)

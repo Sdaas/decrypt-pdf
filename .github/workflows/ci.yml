@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runtime dependencies
+        run: brew install qpdf mupdf-tools ghostscript
+
+      - name: Lint (shellcheck)
+        continue-on-error: true
+        run: |
+          brew install shellcheck
+          shellcheck decrypt-pdf || true
+
+      - name: Tests
+        run: ./test-decrypt-pdf.sh

@@ -2,3 +2,4 @@
 .env
 test-data/
 
+*.tar.gz
