@@ -42,15 +42,15 @@ jobs:
           mkdir -p dist
           cat > dist/decrypt-pdf.rb <<FORMULA
           class DecryptPdf < Formula
-            desc "Decrypt password-protected PDFs using a cascading strategy (qpdf, mutool, ghostscript)"
+            desc "Decrypt password-protected PDFs using qpdf, mutool, or ghostscript"
             homepage "https://github.com/Sdaas/decrypt-pdf"
             url "${FORMULA_URL}"
             sha256 "${FORMULA_SHA}"
             license "MIT"
 
-            depends_on "qpdf"
-            depends_on "mupdf-tools"
             depends_on "ghostscript"
+            depends_on "mupdf-tools"
+            depends_on "qpdf"
 
             def install
               # Stamp the release version into the script's placeholder.
