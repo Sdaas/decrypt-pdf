@@ -116,16 +116,12 @@ The password can be provided in two ways:
 ## <a name='RunningTests'></a>Running Tests
 
 ```bash
-# 1. Create a .env file with the test password (see .env.example)
-cp .env.example .env
-# Edit .env and set TEST_DECRYPT_PASSWORD=<your-password>
-
-# 2. Run the test suite
 ./test-decrypt-pdf.sh
 ```
 
-Tests that require the password will be skipped if `TEST_DECRYPT_PASSWORD` is
-not set. The `.env` file is gitignored and should never be committed.
+The suite is self-contained: it generates its own synthetic encrypted PDFs at
+runtime (via `qpdf`), so no customer files or secret passwords are needed.
+Decryption tests are skipped only if `qpdf` is not installed.
 
 ## <a name='AutomatorQuickActionmacOS'></a>Automator Quick Action (macOS)
 
