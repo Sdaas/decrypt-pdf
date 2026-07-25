@@ -18,7 +18,9 @@ jobs:
         continue-on-error: true
         run: |
           brew install shellcheck
-          shellcheck decrypt-pdf || true
+          shellcheck decrypt-pdf release.sh || true
 
       - name: Tests
-        run: ./test-decrypt-pdf.sh
+        run: ./run-tests.sh
+        env:
+          CI: "true"   # makes run-tests.sh fail on skipped tests (missing runner)

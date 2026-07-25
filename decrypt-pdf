@@ -15,7 +15,8 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-readonly SCRIPT_NAME="$(basename "$0")"
+SCRIPT_NAME="$(basename "$0")"
+readonly SCRIPT_NAME
 readonly VERSION="__VERSION__"   # replaced with the tag version at release time
 readonly COLOR_GREEN="\033[0;32m"
 readonly COLOR_YELLOW="\033[0;33m"
@@ -36,25 +37,25 @@ BACKUP_FILE=""
 # ---------------------------------------------------------------------------
 log_info() {
     if [[ "$VERBOSITY" != "quiet" ]]; then
-        echo -e "${COLOR_GREEN}[INFO]${COLOR_RESET} $*"
+        printf '%b[INFO]%b %s\n' "$COLOR_GREEN" "$COLOR_RESET" "$*"
     fi
 }
 
 log_warn() {
     if [[ "$VERBOSITY" != "quiet" ]]; then
-        echo -e "${COLOR_YELLOW}[WARN]${COLOR_RESET} $*" >&2
+        printf '%b[WARN]%b %s\n' "$COLOR_YELLOW" "$COLOR_RESET" "$*" >&2
     fi
 }
 
 log_error() {
     if [[ "$VERBOSITY" != "quiet" ]]; then
-        echo -e "${COLOR_RED}[ERROR]${COLOR_RESET} $*" >&2
+        printf '%b[ERROR]%b %s\n' "$COLOR_RED" "$COLOR_RESET" "$*" >&2
     fi
 }
 
 log_verbose() {
     if [[ "$VERBOSITY" == "verbose" ]]; then
-        echo -e "[DEBUG] $*"
+        printf '[DEBUG] %s\n' "$*"
     fi
 }
 
@@ -71,6 +72,7 @@ Options:
   -p PASSWORD       Password for the encrypted PDF
   --verbose         Show detailed output from decryption tools
   --quiet, -q       Suppress all output; rely on exit code and output file
+  --version         Show version information and exit
   -h, --help        Show this help message and exit
 
 Password:

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+#
+# pre-push hook — blocks a push if the full test suite does not pass.
+#
+# Install (versioned, recommended — commit this file at .githooks/pre-push):
+#   git config core.hooksPath .githooks
+#   chmod +x .githooks/pre-push
+#
+# Bypass in an emergency only: git push --no-verify
+set -euo pipefail
+
+# Resolve repo root so the hook works regardless of the cwd git invokes it from.
+repo_root="$(git rev-parse --show-toplevel)"
+runner="$repo_root/run-tests.sh"
+
+if [ ! -x "$runner" ]; then
+  echo "pre-push: $runner not found or not executable — cannot verify tests." >&2
+  echo "pre-push: create it (see shell-common test-runner-and-ci reference) or bypass with --no-verify." >&2
+  exit 1
+fi
+
+echo "pre-push: running full test suite before push..."
+if "$runner"; then
+  echo "pre-push: all tests passed — proceeding with push."
+  exit 0
+else
+  echo "pre-push: tests failed — push aborted. Fix the tests or use --no-verify to override." >&2
+  exit 1
+fi

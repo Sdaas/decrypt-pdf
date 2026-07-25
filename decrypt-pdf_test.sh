@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 #
-# test-decrypt-pdf.sh — Tests for decrypt-pdf
+# decrypt-pdf_test.sh — Tests for decrypt-pdf
 #
 
 set -euo pipefail
 
-readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+readonly SCRIPT_DIR
 readonly DECRYPT_SCRIPT="${SCRIPT_DIR}/decrypt-pdf"
 
 # All decryption tests run against synthetic fixtures generated at runtime
@@ -135,6 +136,7 @@ test_missing_password() {
     local input="/tmp/test_decrypt_missingpw_in.pdf"
     make_plain_pdf "$input"
     local rc=0
+    # shellcheck disable=SC1007  # intentional: run with DECRYPT_PASSWORD set empty
     DECRYPT_PASSWORD= bash "$DECRYPT_SCRIPT" "$input" >/dev/null 2>&1 || rc=$?
     assert_exit_code "Missing -p flag exits with 1" 1 "$rc"
     rm -f "$input"

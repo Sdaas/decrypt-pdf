@@ -115,13 +115,22 @@ The password can be provided in two ways:
 
 ## <a name='RunningTests'></a>Running Tests
 
+Run the full suite via the single runner (add `-v` for verbose output):
+
 ```bash
-./test-decrypt-pdf.sh
+./run-tests.sh
 ```
 
-The suite is self-contained: it generates its own synthetic encrypted PDFs at
-runtime (via `qpdf`), so no customer files or secret passwords are needed.
-Decryption tests are skipped only if `qpdf` is not installed.
+Tests are any `*_test.sh` file (`decrypt-pdf_test.sh`, `release_test.sh`); the
+runner discovers them automatically. The decryption suite is self-contained: it
+generates its own synthetic encrypted PDFs at runtime (via `qpdf`), so no
+customer files or secret passwords are needed. Decryption tests are skipped only
+if `qpdf` is not installed.
+
+The same suite also runs automatically on `git push` (via the versioned
+`.githooks/pre-push` hook — enable it once with `git config core.hooksPath
+.githooks`) and in GitHub CI. Bypass the hook in an emergency with
+`git push --no-verify`.
 
 ## <a name='AutomatorQuickActionmacOS'></a>Automator Quick Action (macOS)
 
