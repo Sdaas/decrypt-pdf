@@ -28,7 +28,7 @@ This is **not** a password cracker. It assumes you already know the password.
 
 The simplest way to use it through `homebrew`
 ```bash
-brew tap sdaas/tap
+brew tap sdaas/tools
 brew install decrypt-pdf
 ```
 

@@ -1,12 +1,5 @@
 # PDF Decryption
 
-<!-- vscode-markdown-toc -->
-<!-- vscode-markdown-toc-config
-	numbering=true
-	autoSave=true
-	/vscode-markdown-toc-config -->
-<!-- /vscode-markdown-toc -->
-
 To create a command-line tool that can reliably open a
 password-protected PDF file. This is not a password cracker - it assumes that the 
 user knows the password
@@ -17,14 +10,12 @@ The most common command-line tools are
 - `qpdf`
 - `mupdf-tools`
 - `ghostscript`
-- `pdftk-java` — evaluated but not included in the cascade; the other three tools cover all cases encountered so far
 
 ### QPDF
 
 This works for **most** PDF files and should be the first thing to try
 
 `qpdf input.pdf --password='mypassword' output.pdf` 
-
 
 Sometimes the decryption fails because the PDF passwords are not simple strings. In 
 that case, use a hex-encoded version. First run
@@ -150,11 +141,13 @@ decrypt it via a GUI dialog, without using the terminal.
 
 ## Homebrew Packaging
 
-The tool is distributed via a Homebrew tap (`sdaas/tap`). The formula lives in
-`Formula/decrypt-pdf.rb` in this repo and is mirrored to the
-`homebrew-tap` repository. It downloads a tarball from a GitHub release, installs
-the `decrypt-pdf` script into the Homebrew `bin/` directory, and declares
-`qpdf`, `mupdf-tools`, and `ghostscript` as dependencies.
+The tool is distributed via a Homebrew tap (`sdaas/tools`, hosted at the
+`Sdaas/homebrew-tools` repository). The formula is generated at release time by
+`.github/workflows/release.yml` — which stamps the tag version into the script's
+`__VERSION__` placeholder and renders `Formula/decrypt-pdf.rb` — and is then
+committed and pushed to the tap repository. It downloads a tarball from a GitHub
+release, installs the `decrypt-pdf` script into the Homebrew `bin/` directory,
+and declares `qpdf`, `mupdf-tools`, and `ghostscript` as dependencies.
 
 ## General Behavior
 
