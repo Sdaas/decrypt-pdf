@@ -53,13 +53,16 @@ jobs:
             depends_on "qpdf"
 
             def install
-              # Stamp the release version into the script's placeholder.
+              # Stamp the release version into each script's placeholder.
               inreplace "decrypt-pdf", "__VERSION__", version.to_s
+              inreplace "decrypt-pdfs", "__VERSION__", version.to_s
               bin.install "decrypt-pdf"
+              bin.install "decrypt-pdfs"
             end
 
             test do
               assert_match "decrypt-pdf #{version}", shell_output("#{bin}/decrypt-pdf --version")
+              assert_match "decrypt-pdfs #{version}", shell_output("#{bin}/decrypt-pdfs --version")
             end
           end
           FORMULA

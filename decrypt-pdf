@@ -30,7 +30,9 @@ VERBOSITY="normal"   # normal | verbose | quiet
 PASSWORD=""
 INPUT_FILE=""
 OUTPUT_FILE=""
+OUTPUT_EXPLICIT=false   # true when the user passed an explicit OUTPUT_FILE
 BACKUP_FILE=""
+CLEANUP=false           # --cleanup: archive original, promote decrypted in place
 
 # ---------------------------------------------------------------------------
 # Logging helpers
@@ -72,6 +74,11 @@ Options:
   -p PASSWORD       Password for the encrypted PDF
   --verbose         Show detailed output from decryption tools
   --quiet, -q       Suppress all output; rely on exit code and output file
+  --cleanup         Replace the original in place: on success, archive the
+                    original into an 'originals/' folder beside it and rename
+                    the decrypted file to the original's name. The original is
+                    archived (never deleted). Cannot be combined with an
+                    explicit OUTPUT_FILE.
   --version         Show version information and exit
   -h, --help        Show this help message and exit
 
@@ -92,6 +99,7 @@ Examples:
   ${SCRIPT_NAME} -p 's3cret' document.pdf /tmp/unlocked.pdf
   ${SCRIPT_NAME} --verbose -p 's3cret' document.pdf
   ${SCRIPT_NAME} -q -p 's3cret' document.pdf decrypted.pdf
+  ${SCRIPT_NAME} --cleanup -p 's3cret' document.pdf
   DECRYPT_PASSWORD='s3cret' ${SCRIPT_NAME} document.pdf
 EOF
 }
@@ -118,6 +126,10 @@ parse_args() {
                 VERBOSITY="quiet"
                 shift
                 ;;
+            --cleanup)
+                CLEANUP=true
+                shift
+                ;;
             -p)
                 if [[ $# -lt 2 ]]; then
                     log_error "Option -p requires a PASSWORD argument."
@@ -137,6 +149,7 @@ parse_args() {
                     INPUT_FILE="$1"
                 elif [[ -z "$OUTPUT_FILE" ]]; then
                     OUTPUT_FILE="$1"
+                    OUTPUT_EXPLICIT=true
                 else
                     log_error "Unexpected argument: $1"
                     print_usage >&2
@@ -160,6 +173,14 @@ parse_args() {
     fi
     if [[ -z "$INPUT_FILE" ]]; then
         log_error "Input file is required."
+        print_usage >&2
+        exit 1
+    fi
+
+    # --cleanup replaces the original in place, so an explicit OUTPUT_FILE makes
+    # no sense — reject the combination rather than silently ignoring one.
+    if [[ "$CLEANUP" == true && "$OUTPUT_EXPLICIT" == true ]]; then
+        log_error "--cleanup cannot be combined with an explicit OUTPUT_FILE."
         print_usage >&2
         exit 1
     fi
@@ -427,6 +448,70 @@ run_cascade() {
 }
 
 # ---------------------------------------------------------------------------
+# --cleanup: archive the original and promote the decrypted file in its place.
+#
+# Called from main() ONLY after run_cascade has returned 0, which means
+# verify_decryption already confirmed OUTPUT_FILE is a valid, non-empty,
+# adequately-sized, UNENCRYPTED PDF. The original is *archived, never deleted*,
+# and the two moves are ordered so no failure can leave us without a copy of
+# the original:
+#
+#   1. archive:  INPUT_FILE          -> dir/originals/name.pdf   (mv, not rm)
+#   2. promote:  OUTPUT_FILE (staged) -> INPUT_FILE
+#
+# If step 1 fails, the original is still in place. If step 2 fails, the original
+# is safely archived and the decrypted file still exists at its staged name —
+# we report both paths and, crucially, blank OUTPUT_FILE so the EXIT trap does
+# NOT delete that recoverable decrypted file.
+# ---------------------------------------------------------------------------
+do_cleanup() {
+    local dir base orig_dir archived
+    dir="$(dirname "$INPUT_FILE")"
+    base="$(basename "$INPUT_FILE")"
+    orig_dir="${dir}/originals"
+    archived="${orig_dir}/${base}"
+
+    # Final safety guard: re-verify the staged decrypted output before we touch
+    # anything. Should always hold (run_cascade verified it), but cleanup is
+    # destructive-ish, so we check again immediately before moving files.
+    if ! verify_decryption "$OUTPUT_FILE"; then
+        log_error "Cleanup aborted: decrypted output failed final verification."
+        exit 1
+    fi
+
+    if ! mkdir -p "$orig_dir"; then
+        log_error "Cleanup aborted: could not create ${orig_dir}."
+        exit 1
+    fi
+
+    # Never clobber a previous backup — that could be the only remaining copy of
+    # an earlier original.
+    if [[ -e "$archived" ]]; then
+        log_error "Cleanup aborted: backup already exists: ${archived}"
+        exit 1
+    fi
+
+    # Step 1 — archive the original (moved, never deleted).
+    if ! mv "$INPUT_FILE" "$archived"; then
+        log_error "Cleanup aborted: could not archive original to ${archived}."
+        exit 1
+    fi
+
+    # Step 2 — promote the decrypted file into the original's name.
+    if ! mv "$OUTPUT_FILE" "$INPUT_FILE"; then
+        log_error "Cleanup failed while promoting the decrypted file."
+        log_error "Your original is safe at: ${archived}"
+        log_error "The decrypted file is at: ${OUTPUT_FILE}"
+        # Blank OUTPUT_FILE so the EXIT trap does not delete the recoverable
+        # decrypted file we just told the user about.
+        OUTPUT_FILE=""
+        exit 1
+    fi
+
+    log_info "Cleanup complete: original archived to ${archived}"
+}
+
+# ---------------------------------------------------------------------------
 # Cleanup on unexpected exit — remove partial output files
 # ---------------------------------------------------------------------------
 cleanup_on_exit() {
@@ -447,6 +532,11 @@ main() {
     check_already_unencrypted
     create_backup
     run_cascade
+    # --cleanup: archive the original and promote the decrypted file in place.
+    # Runs only after a verified-successful decryption (run_cascade returned 0).
+    if [[ "$CLEANUP" == true ]]; then
+        do_cleanup
+    fi
     # Clean up backup on success — keep it on failure for debugging
     if [[ -n "$BACKUP_FILE" && -f "$BACKUP_FILE" ]]; then
         rm -f "$BACKUP_FILE"

@@ -125,6 +125,39 @@ Notes
 - always use the `qpdf --show-encryption xxx.pdf` command for this. If the file is not
   password protected, this will return `File is not encrypted` 
 
+## Bulk decryption (`decrypt-pdfs`)
+
+`decrypt-pdfs` is a thin batch wrapper around the single-file `decrypt-pdf`
+engine. It exists so a directory full of statements can be unlocked in one
+command without reinventing the decryption cascade.
+
+Workflow:
+
+- Resolve the engine: prefer a `decrypt-pdf` sitting next to `decrypt-pdfs` (the
+  in-repo / same-`bin` case), otherwise fall back to `decrypt-pdf` on `PATH`.
+- Discover PDFs under the target directory (`-maxdepth 1` unless `--recursive`),
+  NUL-delimited to survive spaces/newlines. Prune the `originals/` archive
+  folder and skip leftover `*_decrypted.pdf` outputs so re-runs are idempotent.
+- For each file, use `qpdf --is-encrypted` to classify it (encrypted / plain /
+  unreadable); plain files are skipped, unreadable ones are reported as failures.
+- For each encrypted file, try every candidate password in order (from repeated
+  `-p` and/or `DECRYPT_PASSWORD`) by invoking `decrypt-pdf -q [...] `, stopping at
+  the first success.
+- `--cleanup` is **delegated** to `decrypt-pdf --cleanup` rather than
+  reimplemented — the archive-never-delete safety logic lives in exactly one
+  place. `--dry-run` reports intended actions and touches nothing (and needs no
+  password).
+- Aggregate a summary (scanned / plain / encrypted / decrypted) and list any
+  failures on stderr.
+
+Design notes:
+
+- Strict mode is `set -uo pipefail` **without** `-e`: a batch tool must survive a
+  single file's failure, keep processing the rest, and report all failures at the
+  end. Every externally-failing command is checked explicitly instead.
+- Exit codes mirror the intent: `0` all decrypted / nothing to do, `1` one or
+  more failures, `2` usage or environment error.
+
 ## Automator Quick Action (macOS)
 
 A macOS Automator Quick Action allows users to right-click a PDF in Finder and
@@ -146,8 +179,10 @@ The tool is distributed via a Homebrew tap (`sdaas/tools`, hosted at the
 `.github/workflows/release.yml` — which stamps the tag version into the script's
 `__VERSION__` placeholder and renders `Formula/decrypt-pdf.rb` — and is then
 committed and pushed to the tap repository. It downloads a tarball from a GitHub
-release, installs the `decrypt-pdf` script into the Homebrew `bin/` directory,
-and declares `qpdf`, `mupdf-tools`, and `ghostscript` as dependencies.
+release, installs both the `decrypt-pdf` and `decrypt-pdfs` scripts into the
+Homebrew `bin/` directory (stamping the tag version into each script's
+`__VERSION__` placeholder), and declares `qpdf`, `mupdf-tools`, and
+`ghostscript` as dependencies.
 
 ## General Behavior
 
@@ -167,3 +202,26 @@ signals some kind of error
     - trying ghostscript with CompatibilityLevel=1.4
     - decryption succeeded (zero exit code)
     - decryption failed (non-zero exit code)
+- provide a `--cleanup` option for **in-place replacement**. By default the tool
+  writes a new `<input>_decrypted.pdf` and leaves the original alone. With
+  `--cleanup`, on a *verified-successful* decryption it archives the original
+  into an `originals/` folder beside it and renames the decrypted file to the
+  original's name, so the plain filename ends up holding the decrypted PDF. This
+  is the per-file primitive that the batch `decrypt-pdfs` tool reuses.
+
+### `--cleanup` safety design
+
+The original is **archived, never deleted** — no failure path can lose it:
+
+- `--cleanup` runs **only after** `run_cascade` succeeds, i.e. `verify_decryption`
+  has confirmed the output is a valid, non-empty, unencrypted PDF (re-checked
+  once more immediately before any move).
+- It **refuses to overwrite** an existing `originals/<name>` backup.
+- The two moves are ordered *archive-then-promote*: `mv INPUT originals/<name>`
+  first, then `mv OUTPUT INPUT`. If the archive fails the original is untouched;
+  if the promote fails the original is safely archived and the decrypted file
+  still exists at its staged name (reported to the user, and shielded from the
+  EXIT-trap cleanup so it isn't deleted).
+- `--cleanup` is **incompatible with an explicit `OUTPUT_FILE`** (usage error,
+  exit 1) and is a **no-op on an already-unencrypted file** (exit 0), which
+  makes it safely **idempotent**.

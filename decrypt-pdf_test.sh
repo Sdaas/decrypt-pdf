@@ -106,6 +106,9 @@ cleanup_tmp_files() {
     # are removed even if a fixture build aborts mid-test.
     rm -f /tmp/test_decrypt_*
     rm -f /tmp/test_unencrypted*
+    # --cleanup tests work inside isolated temp directories (mktemp -d); remove
+    # those too. rm -rf (not -f) because they are directories.
+    rm -rf /tmp/test_cleanup_*
 }
 
 # ---------------------------------------------------------------------------
@@ -364,6 +367,238 @@ test_wrong_password() {
 }
 
 # ---------------------------------------------------------------------------
+# --cleanup feature tests
+#
+# --cleanup performs an in-place replace: on a verified-successful decryption of
+# dir/name.pdf it archives the original into dir/originals/name.pdf and promotes
+# the decrypted file to dir/name.pdf. The original is *archived, never deleted*,
+# so no failure path can lose it. Each test runs inside an isolated temp dir so
+# the shared-name 'originals/' folder can't collide between tests.
+# ---------------------------------------------------------------------------
+test_cleanup_success() {
+    echo "--- Test: --cleanup success (archive + promote) ---"
+    if ! command -v qpdf &>/dev/null; then
+        echo "  SKIP (qpdf not installed)"
+        return
+    fi
+
+    local work
+    work="$(mktemp -d /tmp/test_cleanup_success.XXXXXX)"
+    local enc="${work}/doc.pdf"
+    make_encrypted_pdf "$enc" "$FIXTURE_PASSWORD"
+
+    # Snapshot the encrypted original so we can later prove the archive is a
+    # byte-identical copy (case A2 — original preserved, not corrupted).
+    local snapshot="${work}/doc.encrypted.snapshot"
+    cp "$enc" "$snapshot"
+
+    local rc=0
+    bash "$DECRYPT_SCRIPT" --cleanup -p "$FIXTURE_PASSWORD" "$enc" >/dev/null 2>&1 || rc=$?
+    assert_exit_code "A1: --cleanup exits 0 on success" 0 "$rc"
+
+    if [[ -f "${work}/originals/doc.pdf" ]]; then
+        pass "A1: original archived to originals/doc.pdf"
+    else
+        fail "A1: original not archived to originals/doc.pdf"
+    fi
+
+    # The promoted file must exist at the original name and be unencrypted.
+    if [[ -f "$enc" ]] && qpdf --show-encryption "$enc" 2>&1 | grep -q "File is not encrypted"; then
+        pass "A1: name.pdf now holds a decrypted PDF"
+    else
+        fail "A1: name.pdf missing or still encrypted"
+    fi
+
+    if [[ ! -f "${work}/doc_decrypted.pdf" ]]; then
+        pass "A1: no leftover doc_decrypted.pdf"
+    else
+        fail "A1: staging file doc_decrypted.pdf was left behind"
+    fi
+
+    if [[ ! -f "${enc}.bak" ]]; then
+        pass "A1: no leftover .bak"
+    else
+        fail "A1: .bak was left behind"
+    fi
+
+    if cmp -s "$snapshot" "${work}/originals/doc.pdf"; then
+        pass "A2: archived original is byte-identical to the pre-run original"
+    else
+        fail "A2: archived original differs from the pre-run original"
+    fi
+
+    rm -rf "$work"
+}
+
+test_cleanup_unencrypted_noop() {
+    echo "--- Test: --cleanup on already-unencrypted file is a no-op ---"
+    if ! command -v qpdf &>/dev/null; then
+        echo "  SKIP (qpdf not installed)"
+        return
+    fi
+
+    local work
+    work="$(mktemp -d /tmp/test_cleanup_noop.XXXXXX)"
+    local plain="${work}/doc.pdf"
+    make_plain_pdf "$plain"
+    local snapshot="${work}/doc.snapshot"
+    cp "$plain" "$snapshot"
+
+    local rc=0
+    bash "$DECRYPT_SCRIPT" --cleanup -p "$FIXTURE_PASSWORD" "$plain" >/dev/null 2>&1 || rc=$?
+    assert_exit_code "A3: --cleanup on plain file exits 0" 0 "$rc"
+
+    if [[ ! -d "${work}/originals" ]]; then
+        pass "A3: no originals/ created for a plain file"
+    else
+        fail "A3: originals/ was created for a plain file"
+    fi
+
+    if cmp -s "$snapshot" "$plain"; then
+        pass "A3: plain file left untouched"
+    else
+        fail "A3: plain file was modified"
+    fi
+
+    rm -rf "$work"
+}
+
+test_cleanup_explicit_output_error() {
+    echo "--- Test: --cleanup with explicit OUTPUT_FILE is a usage error ---"
+    if ! command -v qpdf &>/dev/null; then
+        echo "  SKIP (qpdf not installed)"
+        return
+    fi
+
+    local work
+    work="$(mktemp -d /tmp/test_cleanup_output.XXXXXX)"
+    local enc="${work}/doc.pdf"
+    make_encrypted_pdf "$enc" "$FIXTURE_PASSWORD"
+    local snapshot="${work}/doc.snapshot"
+    cp "$enc" "$snapshot"
+
+    local rc=0
+    bash "$DECRYPT_SCRIPT" --cleanup -p "$FIXTURE_PASSWORD" "$enc" "${work}/out.pdf" >/dev/null 2>&1 || rc=$?
+    assert_exit_code "A4: --cleanup + explicit output exits 1" 1 "$rc"
+
+    # Nothing should have moved: no archive, and the original is untouched.
+    if [[ ! -d "${work}/originals" ]] && cmp -s "$snapshot" "$enc"; then
+        pass "A4: no files moved on usage error"
+    else
+        fail "A4: files were moved despite the usage error"
+    fi
+
+    rm -rf "$work"
+}
+
+test_cleanup_wrong_password() {
+    echo "--- Test: --cleanup with wrong password leaves original intact ---"
+    if ! command -v qpdf &>/dev/null; then
+        echo "  SKIP (qpdf not installed)"
+        return
+    fi
+
+    local work
+    work="$(mktemp -d /tmp/test_cleanup_wrongpw.XXXXXX)"
+    local enc="${work}/doc.pdf"
+    make_encrypted_pdf "$enc" "$FIXTURE_PASSWORD"
+    local snapshot="${work}/doc.snapshot"
+    cp "$enc" "$snapshot"
+
+    local rc=0
+    bash "$DECRYPT_SCRIPT" --cleanup -p "definitely_wrong_pw_12345" "$enc" >/dev/null 2>&1 || rc=$?
+    assert_exit_code "A5: --cleanup wrong password exits 1" 1 "$rc"
+
+    if [[ ! -d "${work}/originals" ]] && cmp -s "$snapshot" "$enc" && [[ ! -f "${work}/doc_decrypted.pdf" ]]; then
+        pass "A5: original untouched, no archive, no output on failure"
+    else
+        fail "A5: filesystem changed despite decryption failure"
+    fi
+
+    rm -rf "$work"
+}
+
+test_cleanup_existing_backup() {
+    echo "--- Test: --cleanup refuses to clobber an existing backup ---"
+    if ! command -v qpdf &>/dev/null; then
+        echo "  SKIP (qpdf not installed)"
+        return
+    fi
+
+    local work
+    work="$(mktemp -d /tmp/test_cleanup_existbak.XXXXXX)"
+    local enc="${work}/doc.pdf"
+    make_encrypted_pdf "$enc" "$FIXTURE_PASSWORD"
+    local enc_snapshot="${work}/doc.snapshot"
+    cp "$enc" "$enc_snapshot"
+
+    # Pre-seed an existing archive with sentinel content that must NOT be lost.
+    mkdir -p "${work}/originals"
+    printf 'do-not-clobber-me' > "${work}/originals/doc.pdf"
+
+    local rc=0
+    bash "$DECRYPT_SCRIPT" --cleanup -p "$FIXTURE_PASSWORD" "$enc" >/dev/null 2>&1 || rc=$?
+    assert_exit_code "A6: --cleanup with existing backup exits 1" 1 "$rc"
+
+    if cmp -s "$enc_snapshot" "$enc"; then
+        pass "A6: original left untouched"
+    else
+        fail "A6: original was modified"
+    fi
+
+    if [[ "$(cat "${work}/originals/doc.pdf")" == "do-not-clobber-me" ]]; then
+        pass "A6: existing backup not clobbered"
+    else
+        fail "A6: existing backup was overwritten"
+    fi
+
+    rm -rf "$work"
+}
+
+test_cleanup_help_documented() {
+    echo "--- Test: --help documents --cleanup ---"
+    local output
+    output="$(bash "$DECRYPT_SCRIPT" --help 2>&1)"
+    if echo "$output" | grep -q -- "--cleanup"; then
+        pass "A7: --help output documents --cleanup"
+    else
+        fail "A7: --help output missing --cleanup"
+    fi
+}
+
+test_cleanup_idempotent() {
+    echo "--- Test: --cleanup is idempotent (second run is a safe no-op) ---"
+    if ! command -v qpdf &>/dev/null; then
+        echo "  SKIP (qpdf not installed)"
+        return
+    fi
+
+    local work
+    work="$(mktemp -d /tmp/test_cleanup_idem.XXXXXX)"
+    local enc="${work}/doc.pdf"
+    make_encrypted_pdf "$enc" "$FIXTURE_PASSWORD"
+    # Snapshot the true encrypted original — the archive must still equal this
+    # after a second run (the second, plain-file run must not overwrite it).
+    local snapshot="${work}/doc.encrypted.snapshot"
+    cp "$enc" "$snapshot"
+
+    local rc1=0 rc2=0
+    bash "$DECRYPT_SCRIPT" --cleanup -p "$FIXTURE_PASSWORD" "$enc" >/dev/null 2>&1 || rc1=$?
+    assert_exit_code "A8: first --cleanup run exits 0" 0 "$rc1"
+
+    bash "$DECRYPT_SCRIPT" --cleanup -p "$FIXTURE_PASSWORD" "$enc" >/dev/null 2>&1 || rc2=$?
+    assert_exit_code "A8: second --cleanup run (now plain) exits 0" 0 "$rc2"
+
+    if cmp -s "$snapshot" "${work}/originals/doc.pdf"; then
+        pass "A8: archived original preserved across the second run"
+    else
+        fail "A8: second run corrupted or overwrote the archived original"
+    fi
+
+    rm -rf "$work"
+}
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 main() {
@@ -387,6 +622,15 @@ main() {
     test_verbose_mode
     test_unknown_flag
     test_wrong_password
+
+    # --cleanup feature (Part A)
+    test_cleanup_success
+    test_cleanup_unencrypted_noop
+    test_cleanup_explicit_output_error
+    test_cleanup_wrong_password
+    test_cleanup_existing_backup
+    test_cleanup_help_documented
+    test_cleanup_idempotent
 
     cleanup_tmp_files
 

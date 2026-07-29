@@ -1,0 +1,307 @@
+#!/usr/bin/env bash
+#
+# decrypt-pdfs — Bulk-decrypt password-protected PDF files.
+#
+# Scans a directory (optionally recursively) for PDF files, uses `qpdf` to
+# detect which ones are encrypted, and decrypts each encrypted file with the
+# sibling `decrypt-pdf` engine. All files are assumed to share one password, but
+# you may supply several candidate passwords; each file is tried against them in
+# order until one works.
+#
+# For an encrypted file  dir/name.pdf  the decrypted output is written to
+# dir/name_decrypted.pdf (matching decrypt-pdf's default). With --cleanup the
+# work is delegated to `decrypt-pdf --cleanup`, which archives the original into
+# an  originals/  subfolder and promotes the decrypted file to the original's
+# name — the original is archived, never deleted.
+#
+# Usage:
+#   decrypt-pdfs [OPTIONS] [DIRECTORY]
+#
+# Exit codes:
+#   0  every encrypted file was decrypted (or there was nothing to do)
+#   1  one or more files could not be decrypted (their paths are listed)
+#   2  usage / environment error
+#
+# Dependencies: qpdf, decrypt-pdf
+#
+# NOTE: strict mode here is `set -uo pipefail` WITHOUT `-e` on purpose. This is a
+# batch tool that must keep going after a single file fails and report all the
+# failures at the end; `-e` would abort the whole run on the first non-zero exit.
+# Every externally-failing command is therefore checked explicitly.
+
+set -uo pipefail
+
+readonly VERSION="__VERSION__"   # replaced with the tag version at release time
+
+# ---------------------------------------------------------------------------
+# Defaults / globals
+# ---------------------------------------------------------------------------
+RECURSIVE=false
+CLEANUP=false
+VERBOSE=false
+DRY_RUN=false
+TARGET_DIR="."
+declare -a PASSWORDS=()          # candidate passwords, tried in order
+DECRYPT_PDF=""                   # resolved path to the decrypt-pdf engine
+CURRENT_OUTPUT=""                # partial output for the file being processed
+
+PROG="${0##*/}"
+
+# ---------------------------------------------------------------------------
+# Logging helpers
+# ---------------------------------------------------------------------------
+log()  { [[ "$VERBOSE" == true ]] && printf '%s\n' "$*" >&2; return 0; }
+err()  { printf '%s: %s\n' "$PROG" "$*" >&2; }
+
+usage() {
+    cat <<EOF
+Usage: $PROG [OPTIONS] [DIRECTORY]
+
+Decrypt all encrypted PDF files in DIRECTORY (default: current directory).
+Each encrypted file is decrypted with the sibling 'decrypt-pdf' engine.
+
+Options:
+  -r, --recursive        Also process PDFs in sub-folders.
+  -p, --password PW      Candidate password. May be given multiple times; each
+                         file is tried against every password in order. May also
+                         be supplied via the DECRYPT_PASSWORD environment
+                         variable.
+      --cleanup          Replace each original in place: archive it into an
+                         'originals/' folder and rename the decrypted file to the
+                         original's name (delegated to 'decrypt-pdf --cleanup';
+                         the original is archived, never deleted).
+  -n, --dry-run          Show which files would be decrypted without writing,
+                         moving, or modifying anything. No password required.
+  -v, --verbose          Print per-file progress.
+      --version          Show version information and exit.
+  -h, --help             Show this help and exit.
+
+Exit codes:
+  0  all encrypted files were decrypted (or nothing to do)
+  1  one or more files could not be decrypted (listed on stderr)
+  2  usage or environment error
+
+Examples:
+  $PROG -p 's3cret'
+  $PROG --recursive -p 'pw1' -p 'pw2' --cleanup ~/statements
+  DECRYPT_PASSWORD='s3cret' $PROG -r
+  $PROG --dry-run ~/statements
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -r|--recursive) RECURSIVE=true; shift ;;
+            --cleanup)      CLEANUP=true;   shift ;;
+            -n|--dry-run)   DRY_RUN=true;   shift ;;
+            -v|--verbose)   VERBOSE=true;   shift ;;
+            --version)      echo "decrypt-pdfs ${VERSION}"; exit 0 ;;
+            -h|--help)      usage; exit 0 ;;
+            -p|--password)
+                [[ $# -ge 2 ]] || { err "option $1 requires an argument"; exit 2; }
+                PASSWORDS+=("$2"); shift 2 ;;
+            --password=*)   PASSWORDS+=("${1#*=}"); shift ;;
+            --)             shift; break ;;
+            -*)             err "unknown option: $1"; usage >&2; exit 2 ;;
+            *)              TARGET_DIR="$1"; shift ;;
+        esac
+    done
+    # A directory positional after `--` (if any) wins.
+    [[ $# -gt 0 ]] && TARGET_DIR="$1"
+
+    # Fold in DECRYPT_PASSWORD as an additional candidate.
+    if [[ -n "${DECRYPT_PASSWORD:-}" ]]; then
+        PASSWORDS+=("$DECRYPT_PASSWORD")
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Resolve the decrypt-pdf engine: prefer the copy next to this script (in-repo
+# use), fall back to one on PATH (Homebrew install).
+# ---------------------------------------------------------------------------
+resolve_engine() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ -x "${script_dir}/decrypt-pdf" ]]; then
+        DECRYPT_PDF="${script_dir}/decrypt-pdf"
+    elif command -v decrypt-pdf >/dev/null 2>&1; then
+        DECRYPT_PDF="decrypt-pdf"
+    else
+        err "required command not found: decrypt-pdf"
+        exit 2
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Pre-flight checks
+# ---------------------------------------------------------------------------
+preflight() {
+    command -v qpdf >/dev/null 2>&1 || { err "required command not found: qpdf"; exit 2; }
+    resolve_engine
+
+    [[ -d "$TARGET_DIR" ]] || { err "not a directory: $TARGET_DIR"; exit 2; }
+
+    # A password is needed to actually decrypt, but not to preview in --dry-run.
+    if [[ "$DRY_RUN" == false && ${#PASSWORDS[@]} -eq 0 ]]; then
+        err "no password provided (use -p or DECRYPT_PASSWORD)"; exit 2
+    fi
+}
+
+# Path relative to TARGET_DIR for tidy reporting (fallback: strip leading ./).
+relpath() {
+    local p="$1" base="${TARGET_DIR%/}"
+    if [[ "$p" == "$base/"* ]]; then
+        printf '%s' "${p#"$base"/}"
+    else
+        printf '%s' "${p#./}"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# On interrupt, drop the partial output for the file currently in flight.
+# ---------------------------------------------------------------------------
+# shellcheck disable=SC2329  # invoked indirectly via the trap below
+cleanup_on_signal() {
+    [[ -n "$CURRENT_OUTPUT" && -f "$CURRENT_OUTPUT" ]] && rm -f "$CURRENT_OUTPUT"
+    exit 130
+}
+trap cleanup_on_signal INT TERM
+
+# ---------------------------------------------------------------------------
+# Build the NUL-delimited list of candidate PDFs:
+#   - prune any 'originals' directory (our own archive destination)
+#   - skip files already named *_decrypted.pdf (leftover outputs)
+# ---------------------------------------------------------------------------
+find_pdfs() {
+    local -a depth_args=()
+    [[ "$RECURSIVE" == true ]] || depth_args=(-maxdepth 1)
+    find "$TARGET_DIR" ${depth_args[@]+"${depth_args[@]}"} \
+         -name originals -type d -prune -o \
+         -type f -iname '*.pdf' ! -iname '*_decrypted.pdf' -print0 \
+    | sort -z
+}
+
+# ---------------------------------------------------------------------------
+# Decrypt a single encrypted file, trying each candidate password in order.
+# Returns 0 on success, 1 on failure. Delegates all destructive work (and, with
+# --cleanup, the archive/promote) to decrypt-pdf.
+# ---------------------------------------------------------------------------
+decrypt_one() {
+    local pdf="$1" pw
+    local dir base stem out
+    dir="$(dirname "$pdf")"
+    base="$(basename "$pdf")"
+    stem="${base%.*}"
+    out="${dir}/${stem}_decrypted.pdf"
+
+    for pw in "${PASSWORDS[@]}"; do
+        if [[ "$CLEANUP" == true ]]; then
+            # In-place replace: decrypt-pdf archives the original and promotes
+            # the decrypted file. No separate output path is involved.
+            CURRENT_OUTPUT=""
+            if "$DECRYPT_PDF" -q --cleanup -p "$pw" "$pdf"; then
+                return 0
+            fi
+        else
+            CURRENT_OUTPUT="$out"
+            if "$DECRYPT_PDF" -q -p "$pw" "$pdf" "$out"; then
+                CURRENT_OUTPUT=""
+                return 0
+            fi
+        fi
+    done
+    CURRENT_OUTPUT=""
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+main() {
+    parse_args "$@"
+    preflight
+
+    local -a pdfs=()
+    while IFS= read -r -d '' f; do
+        pdfs+=("$f")
+    done < <(find_pdfs)
+
+    if [[ ${#pdfs[@]} -eq 0 ]]; then
+        echo "No PDF files found in '$TARGET_DIR'."
+        [[ "$DRY_RUN" == true ]] || echo "all files decrypted"
+        exit 0
+    fi
+
+    local -a failed=()
+    local plain_count=0 encrypted_count=0 decrypted_count=0 would_count=0
+    local pdf rel
+
+    for pdf in "${pdfs[@]}"; do
+        rel="$(relpath "$pdf")"
+
+        # qpdf --is-encrypted: 0=encrypted, 2=not encrypted, other=read error.
+        qpdf --is-encrypted "$pdf" >/dev/null 2>&1
+        case $? in
+            0) : ;;  # encrypted — fall through
+            2) log "skip (not encrypted): $rel"; plain_count=$((plain_count + 1)); continue ;;
+            *) err "cannot read PDF (skipping): $rel"; failed+=("$rel"); continue ;;
+        esac
+
+        encrypted_count=$((encrypted_count + 1))
+
+        if [[ "$DRY_RUN" == true ]]; then
+            would_count=$((would_count + 1))
+            if [[ "$CLEANUP" == true ]]; then
+                echo "would decrypt: $rel  (archive original to $(relpath "$(dirname "$pdf")/originals")/$(basename "$pdf"), replace in place)"
+            else
+                local stem="${pdf##*/}"; stem="${stem%.*}"
+                echo "would decrypt: $rel  ->  $(relpath "$(dirname "$pdf")/${stem}_decrypted.pdf")"
+            fi
+            continue
+        fi
+
+        if decrypt_one "$pdf"; then
+            decrypted_count=$((decrypted_count + 1))
+            log "decrypted: $rel"
+        else
+            err "could not decrypt: $rel"
+            failed+=("$rel")
+        fi
+    done
+
+    # Report --------------------------------------------------------------
+    echo
+    if [[ "$DRY_RUN" == true ]]; then
+        echo "Dry run — no files were changed."
+        echo "Scanned : ${#pdfs[@]} PDF(s) in '$TARGET_DIR'"
+        echo "Plain   : $plain_count (not encrypted, would skip)"
+        echo "Encrypted / would decrypt: $would_count"
+    else
+        echo "Scanned : ${#pdfs[@]} PDF(s) in '$TARGET_DIR'"
+        echo "Plain   : $plain_count (not encrypted, skipped)"
+        echo "Encrypted: $encrypted_count"
+        echo "Decrypted: $decrypted_count"
+    fi
+
+    if [[ ${#failed[@]} -eq 0 ]]; then
+        [[ "$DRY_RUN" == true ]] || echo "all files decrypted"
+        exit 0
+    fi
+
+    if [[ "$DRY_RUN" == true ]]; then
+        echo "Could NOT read ${#failed[@]} file(s):" >&2
+    else
+        echo "Could NOT decrypt ${#failed[@]} file(s):" >&2
+    fi
+    local f
+    for f in "${failed[@]}"; do
+        printf '  %s\n' "$f" >&2
+    done
+    exit 1
+}
+
+main "$@"

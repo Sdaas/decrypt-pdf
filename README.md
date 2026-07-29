@@ -7,6 +7,9 @@ for which PDF.
 
 This is **not** a password cracker. It assumes you already know the password.
 
+The package ships two commands: **`decrypt-pdf`** for a single file, and
+**`decrypt-pdfs`** to bulk-decrypt every encrypted PDF in a directory.
+
 ## Quick Start
 
 ```bash
@@ -93,8 +96,25 @@ If neither is provided, the command exits with an error.
 | `-p PASSWORD` | Password for the encrypted PDF |
 | `--verbose` | Show detailed output from each decryption tool |
 | `--quiet`, `-q` | Suppress all output; rely on exit code and output file |
+| `--cleanup` | Replace the original in place: archive it into `originals/` and rename the decrypted file to the original's name. Cannot be combined with an explicit `OUTPUT_FILE`. |
 | `--version` | Show version information and exit |
 | `-h`, `--help` | Show help message and exit |
+
+**In-place replace (`--cleanup`).** Normally `decrypt-pdf` writes a *new*
+`<input>_decrypted.pdf` and leaves the original alone. With `--cleanup`, on a
+successful decryption it instead archives the original into an `originals/`
+folder beside it and renames the decrypted file to the original's name — so the
+plain filename ends up holding the decrypted PDF:
+
+```bash
+decrypt-pdf --cleanup -p 's3cret' document.pdf
+# document.pdf            -> now the decrypted PDF
+# originals/document.pdf  -> the untouched encrypted original
+```
+
+The original is **archived, never deleted**: `--cleanup` only runs after the
+decryption is verified, refuses to overwrite an existing backup, and orders its
+moves so no failure can leave you without a copy of the original.
 
 **Exit codes**
 
@@ -102,6 +122,50 @@ If neither is provided, the command exits with an error.
 |------|---------|
 | 0 | Success (or file is already unencrypted) |
 | 1 | Failure |
+
+### Bulk decryption (`decrypt-pdfs`)
+
+`decrypt-pdfs` decrypts **every** encrypted PDF in a directory in one shot. It
+scans for PDFs, uses `qpdf` to detect which are actually encrypted, and hands
+each one to `decrypt-pdf`. All files are assumed to share a password, but you can
+supply several candidates and each file is tried against them in order.
+
+```bash
+# Decrypt every encrypted PDF in the current directory
+decrypt-pdfs -p 's3cret'
+
+# Recurse into sub-folders, try two candidate passwords, replace originals
+decrypt-pdfs --recursive -p 'pw1' -p 'pw2' --cleanup ~/statements
+
+# Preview what would happen — writes nothing, needs no password
+decrypt-pdfs --dry-run ~/statements
+```
+
+The decrypted file for `name.pdf` is written to `name_decrypted.pdf`. With
+`--cleanup`, the work is delegated to `decrypt-pdf --cleanup`: the original is
+archived into an `originals/` folder and the decrypted file takes the original's
+name (the original is **archived, never deleted**). Files already named
+`*_decrypted.pdf` and anything under `originals/` are skipped.
+
+**Options**
+
+| Flag | Description |
+|------|-------------|
+| `-r`, `--recursive` | Also process PDFs in sub-folders |
+| `-p PW`, `--password PW` | Candidate password; repeatable, tried in order (or via `DECRYPT_PASSWORD`) |
+| `--cleanup` | Replace each original in place (archive to `originals/`, delegated to `decrypt-pdf --cleanup`) |
+| `-n`, `--dry-run` | Show what would be decrypted; change nothing; no password required |
+| `-v`, `--verbose` | Print per-file progress |
+| `--version` | Show version information and exit |
+| `-h`, `--help` | Show help message and exit |
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | All encrypted files were decrypted (or nothing to do) |
+| 1 | One or more files could not be decrypted (listed on stderr) |
+| 2 | Usage or environment error (bad directory, missing dependency, no password) |
 
 ### Automator Quick Action (macOS)
 
@@ -147,6 +211,8 @@ See [design.md](design.md) for the decryption strategy, tool-specific notes
 |------|---------|
 | `decrypt-pdf` | The main script — cascading PDF decryptor |
 | `decrypt-pdf_test.sh` | Tests for `decrypt-pdf` (synthetic fixtures) |
+| `decrypt-pdfs` | Batch wrapper — decrypts every encrypted PDF in a directory |
+| `decrypt-pdfs_test.sh` | Tests for `decrypt-pdfs` (synthetic fixtures) |
 | `release.sh` | Local release pre-flight: bump, gate, tag, push |
 | `release_test.sh` | Characterization tests for `release.sh` |
 | `run-tests.sh` | Single test runner (discovers every `*_test.sh`) |
